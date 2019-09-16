@@ -155,3 +155,97 @@ for i := 0; i < 10; i++ {
      sync.Once.Do(func () { fmt.Println("Do Once") }
 }
 ```
+
+# Cond
+sync.Cond功能上和channal类似，但是sync.Cond缺乏传递变量，channal可以通过传递信号实现变量之间同步，但是sync.Cond也是一个比较方便的并发同步方法。在使用时上需要一些特别的faction设定。 在生产者消费者模型上比较合适。
+
+>sync.Cond和其他一些sync包中的模块不同的是，sync.Cond需要自己实现流程方式，不能直接的开箱即用。
+
+sync.Cond 有下列几种方法：
+```
+cond.L.Lock()和cond.L.Unlock()：也可以使用lock.Lock()和lock.Unlock()，完全一样，因为是指针转递
+
+cond.Wait()：Unlock()->阻塞等待通知(即等待Signal()或Broadcast()的通知)->收到通知->Lock()
+
+cond.Signal()：通知一个Wait()了的，若没有Wait()，也不会报错。Signal()通知的顺序是根据原来加入通知列表(Wait())的先入先出
+
+cond.Broadcast(): 通知所有Wait()了的，若没有Wait()，也不会报错
+```
+声明方式通常为：
+```
+sync.NewCond({sync.Lock}.RLocker())
+```
+可能看得不太明白，下面之间展示常用的 生产者消费者模型：
+```golang
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"sync"
+	"time"
+)
+
+type MyDataBucket struct {
+	br     *bytes.Buffer
+	gmutex *sync.RWMutex
+	rcond  *sync.Cond //读操作需要用到的条件变量
+}
+
+func NewDataBucket() *MyDataBucket {
+	buf := make([]byte, 0)
+	db := &MyDataBucket{
+		br:     bytes.NewBuffer(buf),
+		gmutex: new(sync.RWMutex),
+	}
+	db.rcond = sync.NewCond(db.gmutex.RLocker())
+	return db
+}
+
+func (db *MyDataBucket) Read(i int) {
+	db.gmutex.RLock()
+	defer db.gmutex.RUnlock()
+	var data []byte
+	var d byte
+	var err error
+	for {
+		//读取一个字节
+		if d, err = db.br.ReadByte(); err != nil {
+			if err == io.EOF { // 输入流结束
+				if string(data) != "" {
+					fmt.Printf("reader-%d: %s\n", i, data)
+				}
+				db.rcond.Wait()
+				data = data[:0] //data 清空
+				continue
+			}
+		}
+		data = append(data, d)
+	}
+}
+
+//
+func (db *MyDataBucket) Put(d []byte) (int, error) {
+	db.gmutex.Lock()
+	defer db.gmutex.Unlock()
+	//写入一个数据块
+	n, err := db.br.Write(d)
+	//db.rcond.Broadcast() // 全通知
+	db.rcond.Signal()    // 队列通知 FIFO
+	return n, err
+}
+
+func main() {
+	db := NewDataBucket()
+	go db.Read(1)
+	go db.Read(2)
+	for i := 0; i < 10; i++ {
+		go func(i int) {
+			d := fmt.Sprintf("data-%d", i)
+			db.Put([]byte(d))
+		}(i)
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+```
